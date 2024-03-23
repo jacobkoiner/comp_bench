@@ -1,0 +1,176 @@
+#!/bin/bash
+
+# MIT License
+
+# Copyright (c) 2024 Jacob Koiner
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+REQUIRED=(time awk du tar git gzip bzip2 zstd lz4 xz)
+TAR_NAME=""
+BENCH_ALLOWED=("def" "fast" "slow")
+BENCH_TYPE="def"
+
+# Remove any remaining archives.
+function cleanup () {
+    find . -type f -name "${TAR_NAME}*" -delete
+}
+
+# Required for proper float division in Bash.
+function divide_f () {
+    awk -v n1="${1}" -v n2="${2}" 'BEGIN {printf "%.4f", n1 / n2}'
+}
+
+# Command line argument processing.
+if [[ $# -eq 0 ]]; then
+    echo "!!! Usage: ${0} <file or dir> {def,fast,slow}"
+    exit 1
+fi
+
+if [[ $# -gt 0 ]]; then
+    if [[ -f $1 ]]; then # File
+        TAR_NAME=$1
+        echo "--- Using ${TAR_NAME} as the benchmark target."
+    elif [[ -d "${1%/}" ]]; then # Dir
+        if tar cf "${1%/}.tar" "${1%/}" >/dev/null 2>&1; then
+            TAR_NAME="${1%/}.tar"
+            echo "--- Archiving ${1%/} into ${TAR_NAME} for the benchmark target."
+        else
+            echo "!!! Error archiving ${1%/} as the target archive. Exiting."
+        fi
+    else # Error
+        echo "!!! Usage: ${0} <file or dir> {def,fast,slow}"
+        exit 1
+    fi
+fi
+
+if [[ $# -gt 1 ]]; then
+    if [[ "${BENCH_ALLOWED[*]}" =~ ${2} ]]; then
+        BENCH_TYPE=$2
+    else
+        echo "!!! Usage: ${0} <file or dir> {def,fast,slow}"
+        exit 1
+    fi
+fi
+
+# Check for required system commands and quit if one or more are not present.
+quit=0
+for c in "${REQUIRED[@]}"; do
+    if ! which "${c}" >/dev/null 2>&1; then
+        echo "!!! ${c} is not installed."
+        quit=1
+    fi
+done
+
+if [[ $quit -eq 1 ]]; then
+    echo "!!! Exiting."
+    exit 1
+fi
+
+#
+# Benchmark setup.
+#
+TAR_SIZE=$(du "./${TAR_NAME}" | awk '{print $1}')
+TAR_SIZE_H=$(du -h "./${TAR_NAME}" | awk '{print $1}')
+TIME=$(which time)
+
+# $1: compression command to test i.e 'zstd'
+# $2: arguments to pass through to the command i.e. '-z -f -qq'
+# $3: file extension i.e. 'zst'
+function compression_test () {
+    NAME="${TAR_NAME}.${3}"
+    C_TIME=$($TIME -f '%e' "${1}" ${2} 2>&1) # ${2} should NOT be quoted since we want word splitting to occur.
+    SIZE=$(du "${NAME}" | awk '{print $1}')
+    SIZE_H=$(du -h "${NAME}" | awk '{print $1}')
+    SIZE_RATIO=$(divide_f "${SIZE}" "${TAR_SIZE}")
+    echo "${1}"
+    echo "  time: ${C_TIME}s"
+    echo "  size: ${SIZE} ${SIZE_H}"
+    echo "  ratio: ${SIZE_RATIO}"
+}
+
+# $1: compression command to test i.e 'zstd'
+# $2: arguments to pass through to the command i.e. '-d -f -qq'
+# $3: file extension i.e. 'zst'
+function decompression_test () {
+    rm -rf "./${TAR_NAME}"
+    NAME="${TAR_NAME}.${3}"
+    D_TIME=$($TIME -f '%e' "${1}" ${2} 2>&1) # ${2} should NOT be quoted since we want word splitting to occur.
+    echo "${1}"
+    echo "  time: ${D_TIME}s"
+    rm -rf "./${NAME}"
+}
+
+# Print target size.
+echo ""
+echo "tar"
+echo "  size: ${TAR_SIZE} ${TAR_SIZE_H}"
+echo ""
+
+#
+# Benchmark begin.
+# 
+echo "--- Beginning benchmarks..."
+
+# Compression benchmarks.
+if [[ $BENCH_TYPE = "def" ]]; then
+    echo "--- Default Compression"
+    echo ""
+
+    compression_test "gzip" "-kf -6 ${TAR_NAME}" "gz"
+    compression_test "bzip2" "-kf -9 ${TAR_NAME}" "bz2"
+    compression_test "zstd" "-z -T1 -3 -f -qq -o ${TAR_NAME}.zst ${TAR_NAME}" "zst"
+    compression_test "lz4" "-z -1 -f -qq ${TAR_NAME} ${TAR_NAME}.lz4" "lz4"
+    compression_test "xz" "-kf -6 -T1 ${TAR_NAME}" "xz"
+elif [[ $BENCH_TYPE = "fast" ]]; then
+    echo "--- Fast Compression"
+    echo ""
+
+    compression_test "gzip" "-kf -1 ${TAR_NAME}" "gz"
+    compression_test "bzip2" "-kf -1 ${TAR_NAME}" "bz2"
+    compression_test "zstd" "-z -T1 -1 -f -qq -o ${TAR_NAME}.zst ${TAR_NAME}" "zst"
+    compression_test "lz4" "-z -1 -f -qq ${TAR_NAME} ${TAR_NAME}.lz4" "lz4"
+    compression_test "xz" "-kf -0 -T1 ${TAR_NAME}" "xz"
+elif [[ $BENCH_TYPE = "slow" ]]; then
+    echo "--- Slow Compression"
+    echo ""
+
+    compression_test "gzip" "-kf -9 ${TAR_NAME}" "gz"
+    compression_test "bzip2" "-kf -9 ${TAR_NAME}" "bz2"
+    compression_test "zstd" "-z -T1 -19 -f -qq -o ${TAR_NAME}.zst ${TAR_NAME}" "zst"
+    compression_test "lz4" "-z -9 -f -qq ${TAR_NAME} ${TAR_NAME}.lz4" "lz4"
+    compression_test "xz" "-kf -9 -T1 ${TAR_NAME}" "xz"
+fi
+
+# Decompression benchmarks.
+echo ""
+echo "--- Decompression"
+echo ""
+
+decompression_test "gzip" "-dk ${TAR_NAME}.gz" "gz"
+decompression_test "bzip2" "-dk ${TAR_NAME}.bz2" "bz2"
+decompression_test "zstd" "-d -T1 -f -qq -o ${TAR_NAME} ${TAR_NAME}.zst" "zst"
+decompression_test "lz4" "-d -f -qq ${TAR_NAME}.lz4 ${TAR_NAME}" "lz4"
+decompression_test "xz" "-dk -T1 ${TAR_NAME}.xz" "xz"
+
+# Done.
+echo ""
+echo "--- Benchmarks complete. Cleaning up."
+
+cleanup
